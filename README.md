@@ -285,6 +285,82 @@ This prevents context explosion.
 
 ---
 
+## ⚠️ Limitations & Usage Recommendations (v1)
+
+### 📁 Static File Filtering
+Zani currently skips machine and system files using **static exclusion rules only**.
+
+This means:
+
+- No intelligent filtering yet  
+- No semantic detection of irrelevant files  
+- No adaptive context pruning  
+- No dynamic project chunking  
+
+Zani simply ignores predefined paths and file patterns (for example `.zani`, virtual environments, etc.).
+
+Future versions may introduce smarter filtering, but for now the system relies on **explicit static exclusions only**.
+
+---
+
+### 💰 Cost Awareness (Important)
+Zani builds and processes **full project context** to operate effectively.  
+Because of this, token usage depends heavily on project size.
+
+**Strong recommendation:**
+
+1. First test Zani on a **small project**
+2. Observe token usage
+3. Understand cache behavior
+4. Learn how rebakes affect cost
+5. Estimate realistic usage before scaling
+
+This helps you avoid unexpected costs and understand how the system behaves.
+
+---
+
+### 🧪 Recommended Usage Scope (v1)
+Zani is currently optimized for:
+
+- Small projects  
+- Experimental repositories  
+- Learning workflows  
+- Architecture exploration  
+- Controlled environments  
+
+---
+
+### 🚫 Not Recommended Yet
+For now, Zani is **not recommended for mid-size or large codebases**.
+
+Reasons:
+
+- Static filtering may include unnecessary files  
+- Context size can grow very quickly  
+- Cost estimation becomes harder  
+- Cache rebuilds can become expensive  
+- No advanced project chunking yet  
+
+Large repositories will work technically, but **efficiency and cost control are not fully optimized in this version**.
+
+---
+
+### 👍 Best Practice
+Start small → observe behavior → scale gradually.
+
+---
+
+### 🧯 Susy Behavior Recovery
+If the system starts behaving inconsistently (cache instability, strange responses, etc.):
+
+```bash
+zani init
+```
+
+Reinitializing the workspace usually restores stable operation.
+
+---
+
 ## 🎥 Demo Videos
 
 ### Polished Demo
