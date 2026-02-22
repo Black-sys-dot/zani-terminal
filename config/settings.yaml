@@ -1,0 +1,33 @@
+# Zani Global Configuration
+
+model:
+  name: "gemini-3-flash-preview"
+  api_key_env: "GOOGLE_API_KEY"
+
+explicit_cache:
+  min_tokens: 2500   #33k       # minimum tokens before creating cache
+
+  # % project change thresholds
+  recommend_percent: 5       # suggest rebake
+  force_percent: 15          # force rebake
+
+  # token growth thresholds
+  recommend_tokens: 1500 #5000
+  force_tokens: 3000 # 15000
+
+  ttl_hours: 2
+
+caching:
+  threshold_rebake: 30000
+  min_cache_tokens: 1024
+  default_ttl_hours: 2
+
+safety:
+  static_ignore:
+    - ".git"
+    - "venv"
+    - ".venv"
+    - "node_modules"
+    - "__pycache__"
+    - ".zani"
+  max_file_size_kb: 500
