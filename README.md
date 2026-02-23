@@ -367,14 +367,14 @@ Reinitializing the workspace usually restores stable operation.
 Shows agent workflow and capabilities.
 
 ```
-[https://www.linkedin.com/posts/sarvam-tarapure-a34b8a353_buildinpublic-agenticai-python-ugcPost-7431737801387245568-V33T?utm_source=share&utm_medium=member_desktop&rcm=ACoAAFhGBUgBXX12LIUudR9lGheAXqDoZonblCA]
+https://www.linkedin.com/posts/sarvam-tarapure-a34b8a353_buildinpublic-agenticai-python-ugcPost-7431737801387245568-V33T?utm_source=share&utm_medium=member_desktop&rcm=ACoAAFhGBUgBXX12LIUudR9lGheAXqDoZonblCA
 ```
 
 ### Raw Debug Session
 Unedited engineering session while building and debugging ZANI.
 
 ```
-[https://drive.google.com/file/d/18o-wj8U9rcwwT60F5jvvScAg1ku9-MDE/view?usp=sharing]
+https://drive.google.com/file/d/18o-wj8U9rcwwT60F5jvvScAg1ku9-MDE/view?usp=sharing
 ```
 
 ---
