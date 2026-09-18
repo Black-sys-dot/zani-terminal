@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zani-terminal"
+version = "1.0.0"
+description = "Agentic CLI terminal with intelligent caching, memory compression, and project-aware reasoning"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Sarvam Tarapure" }]
+keywords = ["cli", "ai", "agent", "terminal", "mcp", "gemini", "openrouter"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Artificial Intelligence",
+]
+dependencies = [
+    "google-genai==2.10.0",
+    "PyYAML==6.0.3",
+    "Pillow==12.3.0",
+    "rich==15.0.0",
+    "requests==2.34.2",
+    "mcp==1.28.1",
+    "textual==8.2.8",
+    "textual-image==0.13.2",
+    "psutil==7.2.2",
+    "python-lsp-server==1.14.0",
+]
+
+[project.scripts]
+zani = "zani:main"
+
+[tool.setuptools]
+py-modules = ["zani"]
+packages = ["core", "core.servers", "config", "assets"]
+
+[tool.setuptools.package-data]
+config = ["*.yaml", "*.yml"]
+assets = ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp"]

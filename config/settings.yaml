@@ -1,8 +1,11 @@
 # Zani Global Configuration
 
 model:
-  name: "gemini-3-flash-preview"
+  provider: "openrouter" # "google" or "openrouter"
+  google_model: "gemini-3-flash-preview"
+  openrouter_model: "google/gemma-4-31b-it"
   api_key_env: "GOOGLE_API_KEY"
+  openrouter_key_env: "OPENROUTER_KEY"
 
 explicit_cache:
   min_tokens: 2500   #33k       # minimum tokens before creating cache

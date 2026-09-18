@@ -29,8 +29,13 @@ class SafetyShield:
             return False
 
         filename = os.path.basename(file_path)
+        
+        # Security: NEVER allow .env files to be read into the LLM context
+        if filename.startswith('.env'):
+            return False
+
         # Allow .zani internal files but ignore other hidden clutter
-        if filename.startswith('.') and filename not in ['.env', '.gitignore', '.zani']:
+        if filename.startswith('.') and filename not in ['.gitignore', '.zani']:
             return False
 
         return True

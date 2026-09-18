@@ -28,12 +28,15 @@ class MemoryManager:
     # SAVE TURN
     # ----------------------------------------------------------
 
-    def save_turn(self, role, text):
+    def save_turn(self, role, text, reasoning_details=None):
         history = self.load_history()
-        history.append({
+        turn = {
             "role": role,
             "parts": [{"text": text}]
-        })
+        }
+        if reasoning_details:
+            turn["reasoning_details"] = reasoning_details
+        history.append(turn)
         self._write(history)
 
     # ----------------------------------------------------------

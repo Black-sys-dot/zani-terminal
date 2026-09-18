@@ -1,4 +1,15 @@
-google-genai
-PyYAML
-Pillow
-rich
+# Runtime dependencies. Prefer installing the package instead:
+#   pip install .
+#
+# These are the direct dependencies pinned to the versions Zani was tested
+# against. The full transitive resolution is handled by pip.
+google-genai==2.10.0
+PyYAML==6.0.3
+Pillow==12.3.0
+rich==15.0.0
+requests==2.34.2
+mcp==1.28.1
+textual==8.2.8
+textual-image==0.13.2
+psutil==7.2.2
+python-lsp-server==1.14.0

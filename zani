@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Zani Terminal Linux Launcher
+
+# Get the absolute path of the directory containing this script (resolving symlinks)
+SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+SRC_DIR=$(dirname "$SCRIPT_PATH")
+
+# Check for a virtual environment in the script's directory
+if [ -d "$SRC_DIR/.venv" ]; then
+    PYTHON_BIN="$SRC_DIR/.venv/bin/python3"
+elif [ -d "$SRC_DIR/venv" ]; then
+    PYTHON_BIN="$SRC_DIR/venv/bin/python3"
+else
+    PYTHON_BIN="python3"
+fi
+
+# Run the python script, passing all arguments
+exec "$PYTHON_BIN" "$SRC_DIR/zani.py" "$@"

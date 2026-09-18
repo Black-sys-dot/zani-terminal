@@ -99,7 +99,9 @@ State Persistence
 ```
 zani-terminal/
 │
+├── pyproject.toml
 ├── zani.py
+├── .env.example
 │
 ├── core/
 │   ├── zani_brain.py
@@ -125,9 +127,42 @@ zani-terminal/
 ## ⚙️ Requirements
 
 - Python 3.10+
-- Google Gemini API key
+- pip (or pipx) to install
+- Google Gemini or OpenRouter API key
 - Terminal with ANSI support
 - Internet connection
+
+Optional system tools (Zani degrades gracefully without them):
+
+- `mcp-language-server` — LSP code intelligence
+- `gopls` / `rust-analyzer` / `typescript-language-server` / `clangd` — for non-Python projects
+- `mpv` / `ffplay` / `mpg123` — for voice replies
+
+---
+
+## 📦 Install
+
+Recommended: install as a Python package, which puts a `zani` command on your PATH.
+
+```bash
+# from the repo root
+pip install .
+
+# or for an isolated global install
+pipx install .
+```
+
+Confirm it works:
+
+```bash
+zani --help
+```
+
+For development, run it straight from the source tree instead:
+
+```bash
+python zani.py tui
+```
 
 ---
 
@@ -145,6 +180,32 @@ Value: your_key_here
 
 Restart terminal after setting.
 
+### Linux / macOS
+
+Add this to your shell configuration (e.g., `~/.bashrc`, `~/.zshrc`, or `~/.profile`):
+
+```bash
+export GOOGLE_API_KEY="your_key_here"
+```
+
+And reload your shell:
+```bash
+source ~/.bashrc  # or source ~/.zshrc
+```
+
+### `.env` File (Alternative Setup)
+
+Alternatively, you can create a `.env` file containing the key. ZANI will look for a `.env` file in:
+1. The **installation directory** (next to the installed `zani` script) to apply it globally.
+2. The **current working directory** (where you run the command) to apply it locally to a single project.
+
+Copy `.env.example` to `.env` in either location and fill in the keys. Never commit a real `.env`.
+
+Inside `.env`:
+```env
+GOOGLE_API_KEY="your_key_here"
+```
+
 Why global?
 
 - Works from any directory
@@ -155,6 +216,11 @@ Why global?
 
 ## 🧩 How ZANI Is Made Globally Accessible
 
+`pip install .` (or `pipx install .`) already makes the `zani` command available
+everywhere. The manual launchers below are only needed when running straight
+from the source tree instead.
+
+### Windows
 We run ZANI through a batch launcher.
 
 Example:
@@ -172,9 +238,22 @@ C:\ZaniBin\zani.bat
 
 Then add that folder to system PATH.
 
+### Linux / macOS
+We run ZANI through the shell launcher script `zani` in the root of the repository.
+
+1. Make the scripts executable:
+   ```bash
+   chmod +x zani zani.py
+   ```
+
+2. Symlink the launcher script into a directory in your `PATH` (e.g., `~/.local/bin/` or `/usr/local/bin/`):
+   ```bash
+   ln -s /path/to/zani-terminal/zani ~/.local/bin/zani
+   ```
+
 Result:
 
-```
+```bash
 zani chat "hello"
 ```
 

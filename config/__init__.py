@@ -1,0 +1,1 @@
+"""Bundled Zani configuration data."""

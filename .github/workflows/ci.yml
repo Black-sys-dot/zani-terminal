@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Smoke test entry point (no API key needed)
+        run: zani --help
+
+      - name: Import smoke test
+        run: python -c "import zani, core, core.zani_brain, core.mcp_orchestrator, core.tui"
+
+      - name: Secret scan
+        run: |
+          test ! -f .env
+          if grep -rInE "AIza[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{20,}" \
+              --exclude-dir=.git --exclude-dir=.venv . ; then
+            echo "Secrets detected in the repository." && exit 1
+          fi
+          echo "No secrets found."

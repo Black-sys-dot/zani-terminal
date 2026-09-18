@@ -6,31 +6,15 @@ from PIL import Image
 # ANSI IMAGE RENDERER (YOUR SCRIPT — UNTOUCHED)
 # ==========================================================
 
+import subprocess
+
 def render_logo(image_path, width=60):
     try:
-        img = Image.open(image_path).convert("RGB")
-    except Exception as e:
-        print(f"Error: {e}")
-        return
-
-    original_width, original_height = img.size
-    aspect_ratio = original_height / original_width
-    height = int(width * aspect_ratio)
-    img = img.resize((width, height))
-
-    reset = "\033[0m"
-
-    for y in range(0, height - 1, 2):
-        line = ""
-        for x in range(width):
-            top_rgb = img.getpixel((x, y))
-            bottom_rgb = img.getpixel((x, y + 1))
-
-            line += f"\033[38;2;{top_rgb[0]};{top_rgb[1]};{top_rgb[2]}m"
-            line += f"\033[48;2;{bottom_rgb[0]};{bottom_rgb[1]};{bottom_rgb[2]}m"
-            line += "▀"
-
-        print(line + reset)
+        # We use chafa to render the image in the terminal natively
+        subprocess.run(["chafa", "--size", str(width), image_path])
+    except FileNotFoundError:
+        # Fallback if chafa is somehow not installed
+        print(f"[Image: {os.path.basename(image_path)}]")
 
 
 # ==========================================================
