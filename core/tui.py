@@ -411,7 +411,10 @@ class ZaniTUI(App):
 
         log = self.query_one("#chat_log", RichLog)
         self.log_write(f"[{DIM}]harness online — {len(self.orchestrator.tools_schema)} tools registered[/]")
-        self.log_write(f"[{DIM}]/mode chat|act · ctrl+t toggles · /clear resets the console[/]")
+        hint = f"[{DIM}]/mode chat|act · ctrl+t toggles · /clear resets the console[/]"
+        if self.orchestrator.harness_mode:
+            hint += f"\n[{DIM}]/allow-env — permit one `.env` read for the agent (`.zani.env` stays blocked)[/]"
+        self.log_write(hint)
 
         self.set_interval(1.0, self.tick_gauges)
         self.set_interval(SHEEN_INTERVAL, self.advance_sheen)
@@ -943,8 +946,20 @@ class ZaniTUI(App):
         elif command == "/clear":
             self.log_clear()
             self.log_write(f"[{DIM}]console cleared — agent history untouched[/]")
+        elif command == "/allow-env":
+            if not self.orchestrator.harness_mode:
+                self.log_write(
+                    f"[{DIM}]/allow-env is only for the Zani harness — run [/]"
+                    f"[{DIM}]zani tui --zani[/]"
+                )
+                return
+            self.orchestrator.env_read_granted = True
+            self.log_write(
+                f"[{GREEN}][{now_stamp()}] harness > `.env` reads allowed this session "
+                f"(`.zani.env` remains blocked)[/]"
+            )
         else:
-            self.log_write(f"[{DIM}]unknown command: {command} (try /mode, /tts or /clear)[/]")
+            self.log_write(f"[{DIM}]unknown command: {command} (try /mode, /tts, /clear, /allow-env)[/]")
 
     # ----------------------------------------------------------
     # ORCHESTRATION

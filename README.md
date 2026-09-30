@@ -126,43 +126,41 @@ zani-terminal/
 
 ## ⚙️ Requirements
 
-- Python 3.10+
-- pip (or pipx) to install
-- Google Gemini or OpenRouter API key
-- Terminal with ANSI support
-- Internet connection
+- **Docker** (Engine running, your user allowed to run `docker`)
+- Interactive terminal (`-it`; any modern terminal — no Kitty required)
+- **OpenRouter** or **Google Gemini** API key
+- Internet on first run (image build pulls base layers + Go module)
 
-Optional system tools (Zani degrades gracefully without them):
-
-- `mcp-language-server` — LSP code intelligence
-- `gopls` / `rust-analyzer` / `typescript-language-server` / `clangd` — for non-Python projects
-- `mpv` / `ffplay` / `mpg123` — for voice replies
+Everything else (`pylsp`, `mcp-language-server`, Python stack) ships **inside the image**.
 
 ---
 
 ## 📦 Install
 
-Recommended: install as a Python package, which puts a `zani` command on your PATH.
+1. Clone or copy this repository (keep the folder — the launcher builds from it).
+
+2. Put the **`zani`** shell launcher on your PATH:
 
 ```bash
-# from the repo root
-pip install .
-
-# or for an isolated global install
-pipx install .
+chmod +x /path/to/zani-terminal/zani
+ln -sf /path/to/zani-terminal/zani ~/.local/bin/zani
 ```
 
-Confirm it works:
+3. From **any project directory**:
 
 ```bash
-zani --help
+cd /path/to/your/project
+zani tui
 ```
 
-For development, run it straight from the source tree instead:
+The **first** `zani tui` builds `zani-terminal:latest` automatically (several minutes). Later runs start immediately.
 
 ```bash
-python zani.py tui
+zani build   # force rebuild after you change Zani
+zani help
 ```
+
+The container mounts your **current directory** as `/workspace` and creates **`.zani.env`** there on first run if needed.
 
 ---
 
@@ -195,11 +193,12 @@ source ~/.bashrc  # or source ~/.zshrc
 
 ### `.env` File (Alternative Setup)
 
-Alternatively, you can create a `.env` file containing the key. ZANI will look for a `.env` file in:
-1. The **installation directory** (next to the installed `zani` script) to apply it globally.
-2. The **current working directory** (where you run the command) to apply it locally to a single project.
+Keys are loaded inside the container from:
 
-Copy `.env.example` to `.env` in either location and fill in the keys. Never commit a real `.env`.
+1. **`<zani-repo>/.env`** — optional machine-wide default (copy from `.env.example` next to the launcher).
+2. **`<project>/.zani.env`** — per project (created empty on first `zani tui`; project values override the repo `.env`).
+
+Never commit real `.env` or `.zani.env` files.
 
 Inside `.env`:
 ```env
@@ -216,45 +215,17 @@ Why global?
 
 ## 🧩 How ZANI Is Made Globally Accessible
 
-`pip install .` (or `pipx install .`) already makes the `zani` command available
-everywhere. The manual launchers below are only needed when running straight
-from the source tree instead.
+Symlink the **Docker launcher** `zani` (repo root) into a directory on your `PATH`:
 
-### Windows
-We run ZANI through a batch launcher.
-
-Example:
-
+```bash
+chmod +x /path/to/zani-terminal/zani
+ln -sf /path/to/zani-terminal/zani ~/.local/bin/zani
 ```
-@echo off
-"E:\agenting_gooner\.venv\Scripts\python.exe" "E:\zani-terminal\zani.py" %*
-```
-
-Saved as:
-
-```
-C:\ZaniBin\zani.bat
-```
-
-Then add that folder to system PATH.
-
-### Linux / macOS
-We run ZANI through the shell launcher script `zani` in the root of the repository.
-
-1. Make the scripts executable:
-   ```bash
-   chmod +x zani zani.py
-   ```
-
-2. Symlink the launcher script into a directory in your `PATH` (e.g., `~/.local/bin/` or `/usr/local/bin/`):
-   ```bash
-   ln -s /path/to/zani-terminal/zani ~/.local/bin/zani
-   ```
 
 Result:
 
 ```bash
-zani chat "hello"
+zani tui
 ```
 
 works from any directory on your machine.
@@ -269,58 +240,32 @@ This gives full freedom:
 
 ## 🚀 First Time Setup
 
-Inside your project directory:
+From your project directory, set `GOOGLE_API_KEY` or `OPENROUTER_KEY` (see API Key Setup), then:
 
 ```
-zani init
+zani tui
 ```
 
-This will:
+Use the full character harness:
 
-- scan workspace
-- store genesis snapshot
-- estimate project tokens
-- optionally create explicit cache
+```
+zani tui --zani
+```
 
 ---
 
 ## 💬 Commands
 
-### Initialize workspace
-
-```
-zani init
-```
-
-### Chat with project awareness
-
-```
-zani chat "your question"
-```
-
-### Execute actions (tool enabled)
-
-```
-zani act "your instruction"
-```
-
-### Stop active explicit cache
-
-```
-zani stop
-```
+| Command | Description |
+|---------|-------------|
+| `zani tui` | Base terminal UI (MCP tools, chat/act modes inside the TUI) |
+| `zani tui --zani` | Full Zani visual profile (portrait, backdrop, framed panels) |
 
 ---
 
 ## 🧠 Runtime Behavior
 
-Every request includes a runtime instruction block that defines:
-
-- current mode
-- tool permissions
-- modification policy
-
-This ensures deterministic behavior between chat and act modes.
+Inside the TUI, **chat** and **act** modes control tool access (`/mode chat|act` or Ctrl+T). Each prompt includes a runtime block so the model knows whether tools are allowed.
 
 ---
 
@@ -432,11 +377,7 @@ Start small → observe behavior → scale gradually.
 ### 🧯 Susy Behavior Recovery
 If the system starts behaving inconsistently (cache instability, strange responses, etc.):
 
-```bash
-zani init
-```
-
-Reinitializing the workspace usually restores stable operation.
+Restart the TUI from your project directory if session state looks wrong.
 
 ---
 
@@ -460,13 +401,7 @@ https://drive.google.com/file/d/18o-wj8U9rcwwT60F5jvvScAg1ku9-MDE/view?usp=shari
 
 ## ⚠️ Sus Behavior Recovery
 
-If system behaves unstable:
-
-```
-zani init
-```
-
-Reinitialization rebuilds workspace state and restores stability.
+If the TUI behaves unstable, quit and run `zani tui` again from a clean terminal in your project directory.
 
 ---
 

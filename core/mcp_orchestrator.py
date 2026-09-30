@@ -21,6 +21,7 @@ from core.context_summarizer import (
     summarize_conversation,
     summarize_tool_bodies,
 )
+from core.harness_secrets import guard_bash_command, guard_filesystem_tool
 
 # ==============================================================
 # INTERNAL SYSTEM PROMPT
@@ -43,9 +44,11 @@ MAX_HISTORY_TOKENS = 500000
 KEEP_RECENT_TURNS = 3
 
 class ZaniMCPOrchestrator:
-    def __init__(self, project_path: str, lang_server_command: str):
+    def __init__(self, project_path: str, lang_server_command: str, harness_mode=False):
         self.project_path = os.path.abspath(project_path)
         self.lang_server_command = lang_server_command
+        self.harness_mode = harness_mode
+        self.env_read_granted = False
         self.exit_stack = AsyncExitStack()
         self.sessions = {}
         self.tools_schema = []
@@ -69,9 +72,12 @@ class ZaniMCPOrchestrator:
         bash_server_path = os.path.join(base_dir, "servers", "bash_server.py")
         
         # 1. Filesystem Server (Python)
+        fs_args = [fs_server_path, self.project_path]
+        if self.harness_mode:
+            fs_args.append("--harness")
         fs_params = StdioServerParameters(
             command=python_exe,
-            args=[fs_server_path, self.project_path]
+            args=fs_args,
         )
         
         # 2. Bash Server (Python)
@@ -91,7 +97,19 @@ class ZaniMCPOrchestrator:
                 args=["--workspace", self.project_path, "--lsp", self.lang_server_command]
             )
         else:
-            print("⚠️ LSP unavailable — skipping LSP server (filesystem + bash still active).")
+            if not self.lang_server_command:
+                print(
+                    "⚠️ LSP skipped — no language server (pylsp/gopls/etc.) on this machine. "
+                    "Filesystem global search still works."
+                )
+            elif not shutil.which("mcp-language-server"):
+                print(
+                    "⚠️ LSP skipped — `mcp-language-server` not on PATH (needs a separate install). "
+                    f"Language server ready: {self.lang_server_command}. "
+                    "See README optional tools. Filesystem + bash still active."
+                )
+            else:
+                print("⚠️ LSP unavailable — skipping LSP server (filesystem + bash still active).")
 
         servers["bash"] = bash_params
 
@@ -132,6 +150,27 @@ class ZaniMCPOrchestrator:
 
     async def execute_tool(self, tool_name: str, arguments: dict):
         """Routes a tool call to the appropriate MCP server."""
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        if tool_name in ("read_file", "write_file", "list_directory"):
+            blocked = guard_filesystem_tool(
+                tool_name,
+                arguments,
+                harness=self.harness_mode,
+                env_read_granted=self.env_read_granted,
+            )
+            if blocked:
+                return blocked
+
+        if tool_name == "run_bash_command":
+            cmd = arguments.get("command", "")
+            blocked = guard_bash_command(
+                cmd, self.project_path, harness=self.harness_mode
+            )
+            if blocked:
+                return blocked
+
         # Find which server owns this tool
         server_name = next((t["server"] for t in self.tools_schema if t["function"]["name"] == tool_name), None)
         

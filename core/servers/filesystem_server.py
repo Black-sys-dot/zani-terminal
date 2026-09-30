@@ -2,20 +2,35 @@ import sys
 import os
 import asyncio
 from pathlib import Path
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# Allow imports from package root when spawned as a script.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from core.harness_secrets import (  # noqa: E402
+    secret_kind,
+    should_hide_from_listing,
+    should_skip_in_search,
+)
+
 app = Server("filesystem-server")
 sandbox_dir = None
+harness_mode = False
+
 
 def _resolve_path(path_str):
     p = Path(sandbox_dir) / path_str
-    # Safe sandboxing check
     if not os.path.abspath(p).startswith(os.path.abspath(sandbox_dir)):
         raise ValueError("Security violation: Path is outside the sandbox directory.")
-    if p.name == ".env" or ".env" in p.parts:
-        raise ValueError("Security violation: Access to .env files is strictly prohibited by Zani protocol.")
+    kind = secret_kind(path_str)
+    if kind == "always_blocked":
+        raise ValueError(
+            "Security violation: `.zani.env` is blocked and not accessible to tools."
+        )
+    if kind == "env_gated" and not harness_mode:
+        raise ValueError("Security violation: Access to `.env` files is prohibited.")
     return p
 
 @app.list_tools()
@@ -90,7 +105,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text="Error: Directory not found.")]
             items = []
             for item in path.iterdir():
-                if item.name == ".env":
+                if item.name == ".env" or should_hide_from_listing(
+                    item.name, harness=harness_mode
+                ):
                     continue
                 items.append(f"{'[DIR]' if item.is_dir() else '[FILE]'} {item.name}")
             return [TextContent(type="text", text="\n".join(items) if items else "Directory is empty.")]
@@ -104,7 +121,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             for root, dirs, files in os.walk(sandbox_dir):
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d not in IGNORE_DIRS]
                 for file in files:
-                    if file.startswith('.') or file == ".env":
+                    if should_skip_in_search(file, harness=harness_mode):
+                        continue
+                    if file.startswith('.') and file not in (".gitignore",):
                         continue
                         
                     file_path = os.path.join(root, file)
@@ -131,12 +150,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
 
 async def main():
-    global sandbox_dir
-    # The MCP orchestrator passes the TARGET_PROJECT_PATH as the first sys arg!
+    global sandbox_dir, harness_mode
     if len(sys.argv) > 1:
         sandbox_dir = sys.argv[1]
     else:
         sandbox_dir = os.getcwd()
+    harness_mode = "--harness" in sys.argv[2:]
         
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())

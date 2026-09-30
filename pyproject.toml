@@ -30,8 +30,7 @@ dependencies = [
     "python-lsp-server==1.14.0",
 ]
 
-[project.scripts]
-zani = "zani:main"
+# Host CLI is the Docker launcher script `zani` at repo root — not a pip entry point.
 
 [tool.setuptools]
 py-modules = ["zani"]

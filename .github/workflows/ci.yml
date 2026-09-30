@@ -25,8 +25,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install .
 
-      - name: Smoke test entry point (no API key needed)
-        run: zani --help
+      - name: Smoke test Docker launcher (no API key needed)
+        run: ./zani help
 
       - name: Import smoke test
         run: python -c "import zani, core, core.zani_brain, core.mcp_orchestrator, core.tui"

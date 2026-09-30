@@ -1,18 +1,100 @@
 #!/usr/bin/env bash
-# Zani Terminal Linux Launcher
+# Zani Terminal — Docker-only host launcher.
+# `zani tui` builds the image on first use, then runs the base TUI in a container
+# with the current directory mounted as /workspace.
 
-# Get the absolute path of the directory containing this script (resolving symlinks)
-SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
-SRC_DIR=$(dirname "$SCRIPT_PATH")
+set -euo pipefail
 
-# Check for a virtual environment in the script's directory
-if [ -d "$SRC_DIR/.venv" ]; then
-    PYTHON_BIN="$SRC_DIR/.venv/bin/python3"
-elif [ -d "$SRC_DIR/venv" ]; then
-    PYTHON_BIN="$SRC_DIR/venv/bin/python3"
-else
-    PYTHON_BIN="python3"
-fi
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ZANI_ROOT="$(dirname "$SCRIPT_PATH")"
+IMAGE="${ZANI_IMAGE:-zani-terminal:latest}"
 
-# Run the python script, passing all arguments
-exec "$PYTHON_BIN" "$SRC_DIR/zani.py" "$@"
+usage() {
+  cat <<EOF
+Zani Terminal (Docker)
+
+Usage:
+  zani tui          Run the agent TUI in your current project directory
+  zani build        Rebuild the local Docker image
+  zani help         Show this help
+
+First \`zani tui\` builds ${IMAGE} from:
+  ${ZANI_ROOT}
+
+Requires Docker. API keys: project .zani.env (auto-created) and/or OPENROUTER_KEY /
+GOOGLE_API_KEY in the environment. Optional global defaults: ${ZANI_ROOT}/.env
+EOF
+}
+
+require_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "error: docker is not installed or not on PATH." >&2
+    exit 1
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "error: docker daemon is not running (start Docker and retry)." >&2
+    exit 1
+  fi
+}
+
+ensure_image() {
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "==> No local image ${IMAGE}; building (one-time, may take a few minutes)..."
+  docker build -t "$IMAGE" "$ZANI_ROOT"
+}
+
+run_build() {
+  require_docker
+  docker build -t "$IMAGE" "$ZANI_ROOT"
+}
+
+run_tui() {
+  require_docker
+  ensure_image
+
+  local -a run_args=(
+    run -it --rm --init
+    -e "TERM=${TERM:-xterm-256color}"
+    -e OPENROUTER_KEY
+    -e GOOGLE_API_KEY
+    -v "${PWD}:/workspace"
+    -w /workspace
+  )
+
+  if [[ -f "${ZANI_ROOT}/.env" ]]; then
+    run_args+=(-v "${ZANI_ROOT}/.env:/app/.env:ro")
+  fi
+
+  run_args+=("$IMAGE" tui)
+
+  exec docker "${run_args[@]}" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    help|-h|--help)
+      usage
+      ;;
+    build)
+      shift
+      run_build "$@"
+      ;;
+    tui)
+      shift
+      run_tui "$@"
+      ;;
+    "")
+      usage
+      exit 1
+      ;;
+    *)
+      echo "error: unknown command '$cmd' (try: zani tui)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
