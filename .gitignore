@@ -42,6 +42,7 @@ history.json
 .env
 .env.*
 !.env.example
+.zani.env
 *.key
 *.pem
 
