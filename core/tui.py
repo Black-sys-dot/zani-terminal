@@ -46,7 +46,9 @@ from rich.text import Text
 
 from core import backdrop
 from core.mcp_orchestrator import MAX_HISTORY_TOKENS, ZaniMCPOrchestrator
-from core import model_catalog
+from core import conversation_store, model_catalog
+from core.chat_picker import ChatPickerState, render_chat_picker
+from core.conversation_store import NEW_CHAT_ID
 from core.slash_menu import SlashMenuState, render_menu, SLASH_COMMANDS
 from core.model_picker import ModelPickerState, render_picker
 from core.tas_picker import TasPickerState, render_tas_picker, OFF_ID
@@ -249,6 +251,15 @@ class SlashPromptArea(PromptArea):
 
     async def _on_key(self, event):
         app = self.app
+        chat = getattr(app, "chat_picker", None)
+        if chat and chat.active:
+            if event.key == "enter":
+                event.prevent_default()
+                event.stop()
+                app.confirm_chat_picker()
+                return
+            if hasattr(app, "handle_chat_picker_key") and app.handle_chat_picker_key(event):
+                return
         tas = getattr(app, "tas_picker", None)
         if tas and tas.active:
             if event.key == "enter":
@@ -364,13 +375,13 @@ class ZaniTUI(App):
         padding: 0 1;
     }}
     #hint {{ height: 1; padding: 0 2; color: {DIM}; text-style: bold; }}
-    #model_picker, #slash_menu {{
+    #model_picker, #slash_menu, #chat_picker {{
         display: none;
         height: auto;
         padding: 0 1;
         background: transparent;
     }}
-    #model_picker.-visible, #slash_menu.-visible, #tas_picker.-visible {{ display: block; }}
+    #model_picker.-visible, #slash_menu.-visible, #tas_picker.-visible, #chat_picker.-visible {{ display: block; }}
     #tas_picker {{
         display: none;
         height: auto;
@@ -424,6 +435,8 @@ class ZaniTUI(App):
         self.slash_state = SlashMenuState()
         self.model_picker = ModelPickerState()
         self.tas_picker = TasPickerState()
+        self.chat_picker = ChatPickerState()
+        self.conversation_id: str | None = None
         # Not `self.theme`: that name belongs to Textual's own reactive, which
         # holds a registered theme *name*, not a palette.
         self.zani_theme = get_theme()
@@ -468,6 +481,7 @@ class ZaniTUI(App):
                         yield Static(id="ledger_body", classes="frame-body")
 
             with Container(id="input_dock"):
+                yield Static("", id="chat_picker")
                 yield Static("", id="tas_picker")
                 yield Static("", id="model_picker")
                 yield Static("", id="slash_menu")
@@ -486,7 +500,7 @@ class ZaniTUI(App):
 
         log = self.query_one("#chat_log", RichLog)
         self.log_write(f"[{DIM}]harness online — {len(self.orchestrator.tools_schema)} tools registered[/]")
-        hint = f"[{DIM}]/clear · /model · /TaS · /exit[/]"
+        hint = f"[{DIM}]/clear · /model · /TaS · /new · /resume · /exit[/]"
         if self.orchestrator.harness_mode:
             hint += f"\n[{DIM}]/allow-env — permit one `.env` read for the agent (`.zani.env` stays blocked)[/]"
         self.log_write(hint)
@@ -499,6 +513,7 @@ class ZaniTUI(App):
         # After the first paint: Textual's own screen setup would wipe an image
         # placed any earlier.
         self.call_after_refresh(self._paint_backdrop)
+        self._prompt_saved_sessions_on_startup()
 
     def freeze_body(self) -> None:
         """
@@ -577,6 +592,8 @@ class ZaniTUI(App):
 
     def on_text_area_changed(self, event) -> None:
         area = self.query_one("#chat_input", PromptArea)
+        if self.chat_picker.active:
+            return
         if self.tas_picker.active:
             self.tas_picker.apply_filter(area.text)
             self.refresh_tas_picker()
@@ -621,6 +638,7 @@ class ZaniTUI(App):
             picker_w.update("")
 
     def open_model_picker(self) -> None:
+        self.close_chat_picker()
         self.close_tas_picker()
         self.model_picker.active = True
         self.model_picker.loading = not bool(self._model_catalog_cache)
@@ -655,6 +673,160 @@ class ZaniTUI(App):
         if choice:
             self.apply_model(choice.id)
         self.close_model_picker()
+
+    # ----------------------------------------------------------
+    # SAVED CHATS (per-project `.zani/conversations/`)
+    # ----------------------------------------------------------
+    def _prompt_saved_sessions_on_startup(self) -> None:
+        saved = conversation_store.list_conversations(self.project_path)
+        if saved:
+            self.open_chat_picker(startup=True)
+        else:
+            self.conversation_id = conversation_store.new_conversation_id()
+
+    def persist_current_conversation(self) -> None:
+        history = self.orchestrator.history
+        if not history:
+            return
+        if not self.conversation_id:
+            self.conversation_id = conversation_store.new_conversation_id()
+        conversation_store.save_conversation(
+            self.project_path, self.conversation_id, history
+        )
+
+    def _replay_history_to_log(self, messages: list[dict]) -> None:
+        for msg in messages:
+            role = msg.get("role")
+            if role == "user":
+                text = (msg.get("content") or "").strip()
+                if text:
+                    self.log_write(
+                        f"[{DIM}]…[/] [{CHAT_USER}]user[/] [{DIM}]>[/] {text}"
+                    )
+            elif role == "assistant":
+                content = (msg.get("content") or "").strip()
+                if content:
+                    self.log_write(
+                        Panel(
+                            Markdown(content),
+                            title=f"[{CHAT_ZANI}]zani[/]",
+                            border_style=CHAT_ZANI,
+                            padding=(0, 1),
+                        )
+                    )
+                elif msg.get("tool_calls"):
+                    self.log_write(f"[{DIM}]zani (tool calls)…[/]")
+            elif role == "tool":
+                name = msg.get("name") or "tool"
+                self.log_write(f"[{DIM}]↳ {name}[/]")
+
+    def begin_new_conversation(self, *, announce: bool = True) -> None:
+        if self.is_running_task:
+            return
+        self.persist_current_conversation()
+        self.conversation_id = conversation_store.new_conversation_id()
+        self.orchestrator.history.clear()
+        self.log_clear()
+        self.graph.reset()
+        self.refresh_graph()
+        self.refresh_header()
+        if announce:
+            self.log_write(f"[{GREEN}]new chat[/] [{DIM}]— saved under .zani/conversations/[/]")
+            self.log_write(f"[{DIM}]/model · /TaS · /new · /resume · /clear · /exit[/]")
+
+    def resume_conversation(self, conv_id: str) -> None:
+        if self.is_running_task:
+            return
+        self.persist_current_conversation()
+        messages = conversation_store.load_messages(self.project_path, conv_id)
+        if not messages:
+            self.log_write(f"[{RED}]could not load chat {conv_id}[/]")
+            return
+        self.conversation_id = conv_id
+        self.orchestrator.history = list(messages)
+        self.log_clear()
+        self._replay_history_to_log(messages)
+        title = conversation_store.derive_title(messages)
+        self.log_write(f"[{GREEN}]resumed[/] [{TEXT}]{title}[/]")
+        self.log_write(f"[{DIM}]/model · /TaS · /new · /resume · /clear · /exit[/]")
+        self.refresh_header()
+
+    def refresh_chat_picker(self) -> None:
+        try:
+            widget = self.query_one("#chat_picker", Static)
+        except NoMatches:
+            return
+        body = render_chat_picker(self.chat_picker, self.zani_theme)
+        if body:
+            widget.update(body)
+            widget.add_class("-visible")
+        else:
+            widget.remove_class("-visible")
+            widget.update("")
+
+    def open_chat_picker(self, *, startup: bool = False) -> None:
+        if self.is_running_task:
+            return
+        saved = conversation_store.list_conversations(self.project_path)
+        if not saved and not startup:
+            self.log_write(f"[{DIM}]no saved chats in this project yet — say something to create one[/]")
+            return
+        self.close_model_picker()
+        self.close_tas_picker()
+        self.chat_picker.active = True
+        self.chat_picker.set_conversations(saved, include_new=True)
+        self.slash_state.visible = False
+        area = self.query_one("#chat_input", PromptArea)
+        area.text = ""
+        self.refresh_slash_menu()
+        self.refresh_chat_picker()
+        area.focus()
+        self.resize_prompt()
+
+    def close_chat_picker(self) -> None:
+        if not self.chat_picker.active:
+            return
+        self.chat_picker.reset()
+        try:
+            area = self.query_one("#chat_input", PromptArea)
+            area.text = ""
+        except NoMatches:
+            pass
+        self.refresh_chat_picker()
+        self.refresh_slash_menu()
+        self.resize_prompt()
+
+    def handle_chat_picker_key(self, event) -> bool:
+        if not self.chat_picker.active:
+            return False
+        key = event.key
+        if key == "down":
+            self.chat_picker.move(1)
+            self.refresh_chat_picker()
+            event.prevent_default()
+            return True
+        if key == "up":
+            self.chat_picker.move(-1)
+            self.refresh_chat_picker()
+            event.prevent_default()
+            return True
+        if key == "escape":
+            self.close_chat_picker()
+            if not self.conversation_id:
+                self.conversation_id = conversation_store.new_conversation_id()
+            event.prevent_default()
+            return True
+        return False
+
+    def confirm_chat_picker(self) -> None:
+        if not self.chat_picker.active:
+            return
+        selected = self.chat_picker.selected_id()
+        self.close_chat_picker()
+        if selected == NEW_CHAT_ID or selected is None:
+            self.begin_new_conversation(announce=True)
+        else:
+            self.resume_conversation(selected)
 
     def handle_tas_picker_key(self, event) -> bool:
         if not self.tas_picker.active:
@@ -701,6 +873,7 @@ class ZaniTUI(App):
             widget.update("")
 
     def open_tas_picker(self) -> None:
+        self.close_chat_picker()
         if self.brain.provider != "openrouter":
             self.log_write(f"[{RED}]TaS needs OpenRouter — set provider to openrouter in config.[/]")
             return
@@ -844,7 +1017,7 @@ class ZaniTUI(App):
         self.log_write(f"[{RED}]no TaS-capable models on OpenRouter.[/]")
 
     def handle_slash_key(self, event) -> bool:
-        if self.tas_picker.active or self.model_picker.active:
+        if self.chat_picker.active or self.tas_picker.active or self.model_picker.active:
             return False
         if not self.slash_state.visible:
             return False
@@ -880,7 +1053,7 @@ class ZaniTUI(App):
         except NoMatches:
             return
 
-        if self.model_picker.active or self.tas_picker.active:
+        if self.chat_picker.active or self.model_picker.active or self.tas_picker.active:
             menu.remove_class("-visible")
             menu.update("")
             return
@@ -1251,7 +1424,7 @@ class ZaniTUI(App):
     # ----------------------------------------------------------
     async def on_prompt_area_submitted(self, message: PromptArea.Submitted) -> None:
         prompt = message.value.strip()
-        if not prompt or self.is_running_task:
+        if not prompt or self.is_running_task or self.chat_picker.active:
             return
 
         self.query_one("#chat_input", PromptArea).text = ""
@@ -1299,10 +1472,14 @@ class ZaniTUI(App):
             )
         elif command == "/model":
             self.handle_model_command(parts[1:])
+        elif command == "/new":
+            self.begin_new_conversation(announce=True)
+        elif command == "/resume":
+            self.open_chat_picker()
         else:
             self.log_write(
                 f"[{DIM}]unknown command: {command} "
-                f"(try /model, /TaS, /clear, /exit)[/]"
+                f"(try /model, /TaS, /new, /resume, /clear, /exit)[/]"
             )
 
     def handle_tas_command(self, args: list[str]) -> None:
@@ -1439,9 +1616,11 @@ class ZaniTUI(App):
             self.log_write(f"[{RED}][{now_stamp()}] system > {error}[/]")
         finally:
             self.is_running_task = False
+            self.persist_current_conversation()
             self.refresh_hint()
             self.refresh_status()
             self.refresh_graph()
+            self.refresh_header()
 
     @work(exclusive=True, thread=True)
     def play_tas_audio(self, audio_b64: str) -> None:

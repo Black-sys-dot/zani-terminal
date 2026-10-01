@@ -8,6 +8,8 @@ SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/clear", "clear the chat view"),
     ("/model", "switch text model"),
     ("/TaS", "text + speech (OpenRouter)"),
+    ("/new", "start a new saved chat"),
+    ("/resume", "open a saved chat"),
     ("/exit", "quit zani"),
 )
 

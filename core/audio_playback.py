@@ -6,10 +6,14 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 
 from core.tas_voices import TAS_PCM_CHANNELS, TAS_PCM_SAMPLE_RATE
 
 _PCM_RATES = (TAS_PCM_SAMPLE_RATE, 16000, 22050, 44100, 48000)
+
+_READY_CACHE: tuple[bool, float] | None = None
+_READY_CACHE_TTL = 45.0
 
 
 def in_docker() -> bool:
@@ -74,10 +78,21 @@ def _probe_wav_play(path: str, *, ao: str) -> bool:
     return proc.returncode == 0
 
 
-def playback_ready() -> bool:
+def invalidate_playback_ready_cache() -> None:
+    global _READY_CACHE
+    _READY_CACHE = None
+
+
+def playback_ready(*, force: bool = False) -> bool:
     """
     True when we can reach host audio (Pulse and/or ALSA). False in plain Docker → TaS stays muted.
+    Result is cached briefly — probing runs pactl/mpv and must not run on every UI frame.
     """
+    global _READY_CACHE
+    now = time.monotonic()
+    if not force and _READY_CACHE is not None and now - _READY_CACHE[1] < _READY_CACHE_TTL:
+        return _READY_CACHE[0]
+
     tone = _pcm16_to_wav(b"\x00\x00" * 480, TAS_PCM_SAMPLE_RATE)
     handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     try:
@@ -87,12 +102,16 @@ def playback_ready() -> bool:
             pactl = _pactl_path()
             if pactl and subprocess.run([pactl, "info"], capture_output=True, timeout=5).returncode == 0:
                 if _probe_wav_play(handle.name, ao="pulse"):
+                    _READY_CACHE = (True, now)
                     return True
         if os.path.isdir("/dev/snd"):
             if _probe_wav_play(handle.name, ao="alsa"):
+                _READY_CACHE = (True, now)
                 return True
+        _READY_CACHE = (False, now)
         return False
     except Exception:
+        _READY_CACHE = (False, now)
         return False
     finally:
         try:

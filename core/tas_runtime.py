@@ -15,6 +15,5 @@ def tas_status_label(brain) -> str:
     if not getattr(brain, "tas_enabled", False):
         return "off"
     voice = getattr(brain, "tas_voice", "shimmer")
-    if audio_playback.playback_ready():
-        return f"on ({voice}) live"
-    return f"on ({voice}) muted"
+    live = audio_playback.playback_ready()
+    return f"on ({voice}) {'live' if live else 'muted'}"

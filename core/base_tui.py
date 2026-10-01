@@ -15,6 +15,7 @@ from core.tui import (
     SlashPromptArea,
     PromptArea,
     SHEEN_INTERVAL,
+    SHEEN_STEP,
     SPINNER,
     PROMPT_MAX_LINES,
 )
@@ -68,6 +69,7 @@ class BaseTUI(ZaniTUI):
             yield RichLog(id="chat_log", highlight=False, markup=True, wrap=True)
             with Vertical(id="input_dock"):
                 yield BaseStatusBox(id="status_box")
+                yield Static("", id="chat_picker")
                 yield Static("", id="tas_picker")
                 yield Static("", id="model_picker")
                 yield Static("", id="slash_menu")
@@ -84,7 +86,7 @@ class BaseTUI(ZaniTUI):
             f"type [/][{self.zani_theme.mauve}]/[/][{self.zani_theme.subtext}] for commands[/]"
         )
         self.log_write(
-            f"[{self.zani_theme.subtext}]/model · /TaS · /clear · /exit[/]"
+            f"[{self.zani_theme.subtext}]/model · /TaS · /new · /resume · /clear · /exit[/]"
         )
         if getattr(self.brain, "tas_enabled", False) and not audio_playback.playback_ready():
             if audio_playback.in_docker():
@@ -98,8 +100,19 @@ class BaseTUI(ZaniTUI):
                     "No working audio output here. Chat uses your text model — no audio charges."
                 )
             self.log_write(f"[{self.zani_theme.subtext}]{hint}[/]")
-        self.set_interval(SHEEN_INTERVAL, self.advance_sheen)
+        self.set_interval(SHEEN_INTERVAL, self._advance_sheen_hint_only)
         self.refresh_hint()
+        self._prompt_saved_sessions_on_startup()
+
+    def _advance_sheen_hint_only(self) -> None:
+        """Sheen animation for the hint line only — not the status box (expensive)."""
+        from textual.css.query import NoMatches
+
+        self._sheen_phase = (self._sheen_phase + SHEEN_STEP) % 1.0
+        try:
+            self.refresh_hint()
+        except NoMatches:
+            pass
 
     def _apply_theme(self) -> None:
         t = self.zani_theme
@@ -128,13 +141,13 @@ class BaseTUI(ZaniTUI):
             padding: 0 1 0 1;
             background: {t.css_panel_bg};
         }}
-        #tas_picker, #model_picker, #slash_menu {{
+        #chat_picker, #tas_picker, #model_picker, #slash_menu {{
             display: none;
             height: auto;
             padding: 0 1;
             background: {t.css_panel_bg};
         }}
-        #tas_picker.-visible, #model_picker.-visible, #slash_menu.-visible {{ display: block; }}
+        #chat_picker.-visible, #tas_picker.-visible, #model_picker.-visible, #slash_menu.-visible {{ display: block; }}
         #chat_input {{
             height: auto;
             min-height: 1;
@@ -188,6 +201,7 @@ class BaseTUI(ZaniTUI):
         area.styles.height = rows + 2
 
     def refresh_header(self):
+        """Status box — call on model/TaS/context changes, not every sheen tick."""
         try:
             self.query_one("#status_box", BaseStatusBox).refresh()
         except Exception:
