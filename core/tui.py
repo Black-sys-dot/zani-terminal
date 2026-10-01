@@ -22,6 +22,7 @@ from PIL import Image as PILImage
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -44,8 +45,15 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from core import backdrop
-from core.speech import Speaker
 from core.mcp_orchestrator import MAX_HISTORY_TOKENS, ZaniMCPOrchestrator
+from core import model_catalog
+from core.slash_menu import SlashMenuState, render_menu, SLASH_COMMANDS
+from core.model_picker import ModelPickerState, render_picker
+from core.tas_picker import TasPickerState, render_tas_picker, OFF_ID
+from core.tas_catalog import list_tas_models
+from core.tas_voices import normalize_voice, TAS_STREAM_AUDIO_FORMAT
+from core import audio_playback
+from core.themes import get_theme
 from core import pricing
 from core.telemetry import UsageStore, human_tokens, sample_system
 from core.tool_registry import ERROR, OK, RUNNING, ToolGraph, describe
@@ -236,6 +244,47 @@ class PromptArea(TextArea):
         await super()._on_key(event)
 
 
+class SlashPromptArea(PromptArea):
+    """Prompt with agy-style `/` palette navigation."""
+
+    async def _on_key(self, event):
+        app = self.app
+        tas = getattr(app, "tas_picker", None)
+        if tas and tas.active:
+            if event.key == "enter":
+                event.prevent_default()
+                event.stop()
+                app.confirm_tas_picker()
+                return
+            if hasattr(app, "handle_tas_picker_key") and app.handle_tas_picker_key(event):
+                return
+        picker = getattr(app, "model_picker", None)
+        if picker and picker.active:
+            if event.key == "enter":
+                event.prevent_default()
+                event.stop()
+                app.confirm_model_picker()
+                return
+            if hasattr(app, "handle_model_picker_key") and app.handle_model_picker_key(event):
+                return
+        if hasattr(app, "handle_slash_key") and app.handle_slash_key(event):
+            return
+        if event.key == "enter" and getattr(app, "slash_state", None):
+            if app.slash_state.visible and app.slash_state.selected():
+                cmd, _ = app.slash_state.selected()
+                line = self.text.strip()
+                low, cmd_low = line.lower(), cmd.lower()
+                # Partial token (/mo): enter completes. Full command (/model): submit.
+                if low != cmd_low and not low.startswith(cmd_low + " "):
+                    event.prevent_default()
+                    event.stop()
+                    self.text = app.slash_state.apply_to_line(self.text)
+                    app.slash_state.sync(self.text)
+                    app.refresh_slash_menu()
+                    return
+        await super()._on_key(event)
+
+
 class ZaniTUI(App):
     CSS = f"""
     /* Nothing may be opaque: any solid background punches a hole in the
@@ -315,14 +364,30 @@ class ZaniTUI(App):
         padding: 0 1;
     }}
     #hint {{ height: 1; padding: 0 2; color: {DIM}; text-style: bold; }}
+    #model_picker, #slash_menu {{
+        display: none;
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+    }}
+    #model_picker.-visible, #slash_menu.-visible, #tas_picker.-visible {{ display: block; }}
+    #tas_picker {{
+        display: none;
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+    }}
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
-        ("ctrl+t", "toggle_mode", "Toggle mode"),
-        ("ctrl+f", "toggle_chat", "Focus chat"),
-        ("ctrl+s", "toggle_speech", "Speak replies"),
+        Binding("ctrl+c", "quit", "Quit"),
+        Binding("ctrl+f", "toggle_chat", "Focus chat"),
+        # Textual's default ctrl+q also calls quit — override it; use /exit instead.
+        Binding("ctrl+q", "swallow_ctrl_q", show=False, priority=True),
     ]
+
+    def action_swallow_ctrl_q(self) -> None:
+        """Intentionally empty — quit via /exit or ctrl+c."""
 
     def __init__(self, brain, orchestrator: ZaniMCPOrchestrator, project_path=None):
         super().__init__()
@@ -335,7 +400,6 @@ class ZaniTUI(App):
         self.orchestrator = orchestrator
         self.project_path = project_path or os.getcwd()
 
-        self.mode = "act"
         self.is_running_task = False
         self.chat_expanded = False
         # Every line ever shown, kept so the console can be re-rendered at a
@@ -352,9 +416,17 @@ class ZaniTUI(App):
         self._sheen_phase = 0.0
         self._backdrop_timer = None
         self._prompt_rows = 1
-        # Off by default and never self-starting: each spoken line is a
-        # billed call, so it waits for /tts or ctrl+s.
-        self.speaker = Speaker(getattr(brain, 'api_key', '') or '')
+        self._text_model = brain.model_name
+        self._tas_catalog_cache = None
+        self._last_speech_error = None
+        self._tas_muted_notice = False
+        self._model_catalog_cache = None
+        self.slash_state = SlashMenuState()
+        self.model_picker = ModelPickerState()
+        self.tas_picker = TasPickerState()
+        # Not `self.theme`: that name belongs to Textual's own reactive, which
+        # holds a registered theme *name*, not a palette.
+        self.zani_theme = get_theme()
 
     # ----------------------------------------------------------
     # COMPOSE
@@ -396,7 +468,10 @@ class ZaniTUI(App):
                         yield Static(id="ledger_body", classes="frame-body")
 
             with Container(id="input_dock"):
-                yield PromptArea(id="chat_input")
+                yield Static("", id="tas_picker")
+                yield Static("", id="model_picker")
+                yield Static("", id="slash_menu")
+                yield SlashPromptArea(id="chat_input")
                 yield Static(id="hint")
 
     # ----------------------------------------------------------
@@ -411,7 +486,7 @@ class ZaniTUI(App):
 
         log = self.query_one("#chat_log", RichLog)
         self.log_write(f"[{DIM}]harness online — {len(self.orchestrator.tools_schema)} tools registered[/]")
-        hint = f"[{DIM}]/mode chat|act · ctrl+t toggles · /clear resets the console[/]"
+        hint = f"[{DIM}]/clear · /model · /TaS · /exit[/]"
         if self.orchestrator.harness_mode:
             hint += f"\n[{DIM}]/allow-env — permit one `.env` read for the agent (`.zani.env` stays blocked)[/]"
         self.log_write(hint)
@@ -501,7 +576,323 @@ class ZaniTUI(App):
             pass
 
     def on_text_area_changed(self, event) -> None:
+        area = self.query_one("#chat_input", PromptArea)
+        if self.tas_picker.active:
+            self.tas_picker.apply_filter(area.text)
+            self.refresh_tas_picker()
+        elif self.model_picker.active:
+            self.model_picker.apply_filter(area.text)
+            self.refresh_model_picker()
+        else:
+            self.refresh_slash_menu()
         self.resize_prompt()
+
+    def handle_model_picker_key(self, event) -> bool:
+        if not self.model_picker.active:
+            return False
+        key = event.key
+        if key == "down":
+            self.model_picker.move(1)
+            self.refresh_model_picker()
+            event.prevent_default()
+            return True
+        if key == "up":
+            self.model_picker.move(-1)
+            self.refresh_model_picker()
+            event.prevent_default()
+            return True
+        if key == "escape":
+            self.close_model_picker()
+            event.prevent_default()
+            return True
+        return False
+
+    def refresh_model_picker(self) -> None:
+        try:
+            picker_w = self.query_one("#model_picker", Static)
+        except NoMatches:
+            return
+        body = render_picker(self.model_picker, self.zani_theme, self.brain.model_name)
+        if body:
+            picker_w.update(body)
+            picker_w.add_class("-visible")
+        else:
+            picker_w.remove_class("-visible")
+            picker_w.update("")
+
+    def open_model_picker(self) -> None:
+        self.close_tas_picker()
+        self.model_picker.active = True
+        self.model_picker.loading = not bool(self._model_catalog_cache)
+        self.model_picker.error = None
+        self.slash_state.visible = False
+        area = self.query_one("#chat_input", PromptArea)
+        area.text = ""
+        self.refresh_slash_menu()
+        self.refresh_model_picker()
+        area.focus()
+        if self._model_catalog_cache:
+            self.model_picker.set_models(self._model_catalog_cache)
+            self.model_picker.focus_id(self.brain.model_name)
+            self.refresh_model_picker()
+        else:
+            self.fetch_model_list()
+
+    def close_model_picker(self) -> None:
+        self.model_picker.reset()
+        try:
+            area = self.query_one("#chat_input", PromptArea)
+            area.text = ""
+        except NoMatches:
+            pass
+        self.refresh_model_picker()
+        self.refresh_slash_menu()
+
+    def confirm_model_picker(self) -> None:
+        if self.model_picker.loading:
+            return
+        choice = self.model_picker.selected()
+        if choice:
+            self.apply_model(choice.id)
+        self.close_model_picker()
+
+    def handle_tas_picker_key(self, event) -> bool:
+        if not self.tas_picker.active:
+            return False
+        key = event.key
+        if key == "down":
+            self.tas_picker.move(1)
+            self.refresh_tas_picker()
+            event.prevent_default()
+            return True
+        if key == "up":
+            self.tas_picker.move(-1)
+            self.refresh_tas_picker()
+            event.prevent_default()
+            return True
+        if key == "escape":
+            if self.tas_picker.step == "voice" and self._tas_catalog_cache:
+                self.tas_picker.set_models(
+                    self._tas_catalog_cache,
+                    tas_enabled=self.brain.tas_enabled,
+                    current_model=self.brain.model_name,
+                    current_voice=self.brain.tas_voice,
+                )
+                area = self.query_one("#chat_input", PromptArea)
+                area.text = ""
+                self.refresh_tas_picker()
+            else:
+                self.close_tas_picker()
+            event.prevent_default()
+            return True
+        return False
+
+    def refresh_tas_picker(self) -> None:
+        try:
+            widget = self.query_one("#tas_picker", Static)
+        except NoMatches:
+            return
+        body = render_tas_picker(self.tas_picker, self.zani_theme)
+        if body:
+            widget.update(body)
+            widget.add_class("-visible")
+        else:
+            widget.remove_class("-visible")
+            widget.update("")
+
+    def open_tas_picker(self) -> None:
+        if self.brain.provider != "openrouter":
+            self.log_write(f"[{RED}]TaS needs OpenRouter — set provider to openrouter in config.[/]")
+            return
+        if not self.brain.api_key:
+            self.log_write(f"[{RED}]TaS needs OPENROUTER_KEY.[/]")
+            return
+        if self.model_picker.active:
+            self.close_model_picker()
+        self.tas_picker.active = True
+        self.tas_picker.loading = not bool(self._tas_catalog_cache)
+        self.tas_picker.error = None
+        self.slash_state.visible = False
+        area = self.query_one("#chat_input", PromptArea)
+        area.text = ""
+        self.refresh_slash_menu()
+        self.refresh_tas_picker()
+        area.focus()
+        if self._tas_catalog_cache:
+            self.tas_picker.set_models(
+                self._tas_catalog_cache,
+                tas_enabled=self.brain.tas_enabled,
+                current_model=self.brain.model_name,
+                current_voice=self.brain.tas_voice,
+            )
+            self.refresh_tas_picker()
+        else:
+            self.fetch_tas_list()
+
+    def close_tas_picker(self) -> None:
+        self.tas_picker.reset()
+        try:
+            self.query_one("#chat_input", PromptArea).text = ""
+        except NoMatches:
+            pass
+        self.refresh_tas_picker()
+        self.refresh_slash_menu()
+
+    def confirm_tas_picker(self) -> None:
+        if self.tas_picker.loading:
+            return
+        choice = self.tas_picker.selected()
+        if not choice:
+            self.close_tas_picker()
+            return
+        if self.tas_picker.step == "voice":
+            voice = self.tas_picker.selected_voice_id() or self.brain.tas_voice
+            self.enable_tas(self.tas_picker.pending_model, voice=voice)
+            self.close_tas_picker()
+            return
+        if choice.id == OFF_ID:
+            self.disable_tas()
+            self.close_tas_picker()
+            return
+        self.tas_picker.begin_voice_step(choice.id)
+        area = self.query_one("#chat_input", PromptArea)
+        area.text = ""
+        self.refresh_tas_picker()
+        area.focus()
+
+    def disable_tas(self) -> None:
+        self.brain.tas_enabled = False
+        restore = self._text_model or self.brain.model_name
+        self.brain.model_name = restore
+        model_catalog.save_project_model(
+            self.project_path, restore, tas_enabled=False, text_model=restore,
+        )
+        self.rates = None
+        self.refresh_header()
+        self.log_write(f"[{DIM}]TaS off · model →[/] [{TEXT}]{restore}[/]")
+
+    def enable_tas(self, model_id: str, voice: str | None = None) -> None:
+        if not self.brain.tas_enabled:
+            self._text_model = self.brain.model_name
+        self.brain.tas_enabled = True
+        self.brain.text_model_fallback = self._text_model
+        self.brain.model_name = model_id
+        self.brain.tas_voice = normalize_voice(voice or self.brain.tas_voice)
+        model_catalog.save_project_model(
+            self.project_path,
+            model_id,
+            tas_enabled=True,
+            text_model=self._text_model,
+            tas_voice=self.brain.tas_voice,
+        )
+        self.rates = None
+        self.refresh_header()
+        self.log_write(
+            f"[{GREEN}]TaS on ·[/] [{TEXT}]{model_id}[/] "
+            f"[{DIM}]· voice {self.brain.tas_voice}[/]"
+        )
+        if not audio_playback.playback_ready():
+            fix = (
+                "host Pulse TCP on 4713 (see zani help)"
+                if audio_playback.in_docker()
+                else "fix local Pulse/mpv"
+            )
+            self.log_write(
+                f"[{RED}]TaS audio disabled for API calls — playback not ready. "
+                f"Using text model[/] [{TEXT}]{self._text_model}[/] "
+                f"[{DIM}](saves audio $). {fix} or turn TaS off.[/]"
+            )
+
+    @work(thread=True, exclusive=False)
+    def fetch_tas_list(self) -> None:
+        try:
+            choices = list_tas_models(self.brain.api_key)
+        except Exception as exc:
+            self.call_from_thread(self._on_tas_list_failed, exc)
+            return
+        if not choices:
+            self.call_from_thread(self._on_tas_list_empty)
+            return
+        self.call_from_thread(self._on_tas_list_loaded, choices)
+
+    def _on_tas_list_loaded(self, choices) -> None:
+        self._tas_catalog_cache = choices
+        if not self.tas_picker.active:
+            self.tas_picker.active = True
+        self.tas_picker.set_models(
+            choices,
+            tas_enabled=self.brain.tas_enabled,
+            current_model=self.brain.model_name,
+            current_voice=self.brain.tas_voice,
+        )
+        self.refresh_tas_picker()
+
+    def _on_tas_list_failed(self, exc: Exception) -> None:
+        if self.tas_picker.active:
+            self.tas_picker.loading = False
+            self.tas_picker.error = str(exc)
+            self.refresh_tas_picker()
+            return
+        self.log_write(f"[{RED}]TaS model list failed: {exc}[/]")
+
+    def _on_tas_list_empty(self) -> None:
+        if self.tas_picker.active:
+            self.tas_picker.loading = False
+            self.tas_picker.error = "no OpenRouter models with text+audio output"
+            self.refresh_tas_picker()
+            return
+        self.log_write(f"[{RED}]no TaS-capable models on OpenRouter.[/]")
+
+    def handle_slash_key(self, event) -> bool:
+        if self.tas_picker.active or self.model_picker.active:
+            return False
+        if not self.slash_state.visible:
+            return False
+        key = event.key
+        if key == "down":
+            self.slash_state.move(1)
+            self.refresh_slash_menu()
+            event.prevent_default()
+            return True
+        if key == "up":
+            self.slash_state.move(-1)
+            self.refresh_slash_menu()
+            event.prevent_default()
+            return True
+        if key == "tab":
+            area = self.query_one("#chat_input", PromptArea)
+            area.text = self.slash_state.apply_to_line(area.text)
+            self.slash_state.sync(area.text)
+            self.refresh_slash_menu()
+            event.prevent_default()
+            return True
+        if key == "escape":
+            self.slash_state.visible = False
+            self.refresh_slash_menu()
+            event.prevent_default()
+            return True
+        return False
+
+    def refresh_slash_menu(self) -> None:
+        try:
+            menu = self.query_one("#slash_menu", Static)
+            text = self.query_one("#chat_input", PromptArea).text
+        except NoMatches:
+            return
+
+        if self.model_picker.active or self.tas_picker.active:
+            menu.remove_class("-visible")
+            menu.update("")
+            return
+
+        self.slash_state.sync(text)
+        body = render_menu(self.slash_state, self.zani_theme)
+        if body:
+            menu.update(body)
+            menu.add_class("-visible")
+        else:
+            menu.remove_class("-visible")
+            menu.update("")
 
     def resize_prompt(self) -> None:
         """
@@ -685,13 +1076,14 @@ class ZaniTUI(App):
         line.append("  ::  ", style=Style(color=DIM, bold=True))
         line.append(project, style=Style(color=TEXT, bold=True))
         line.append("   //  ", style=Style(color=DIM, bold=True))
-        line.append(f"{self.mode.upper()}_MODE", style=Style(color=VIOLET, bold=True))
+        tas = "TaS" if self.brain.tas_enabled else "TEXT"
+        line.append(tas, style=Style(color=VIOLET, bold=True))
         line.append("   //  ", style=Style(color=DIM, bold=True))
         line.append(now_stamp(), style=Style(color=DIM, bold=True))
         self.query_one("#header", Static).update(line)
 
     def refresh_caption(self) -> None:
-        accent = MAGENTA if self.mode == "act" else CYAN
+        accent = MAGENTA
         self.query_one("#caption", Static).update(
             Align.center(
                 Group(
@@ -709,15 +1101,13 @@ class ZaniTUI(App):
         used = self.orchestrator._history_tokens()
         pct = min(100.0, used / MAX_HISTORY_TOKENS * 100)
         colour = GREEN if pct < 50 else AMBER if pct < 80 else RED
-        mode_colour = MAGENTA if self.mode == "act" else CYAN
-
         model = self.brain.model_name
         if len(model) > 24:
             model = "…" + model[-23:]
+        tas_line = f"[{GREEN}]on[/]" if self.brain.tas_enabled else f"[{DIM}]off[/]"
 
         self.query_one("#status_body", Static).update(
-            f"[{DIM}]MODE[/]      [{mode_colour}]{self.mode.upper()}[/]"
-            f"  [{DIM}]({'tools live' if self.mode == 'act' else 'tools held'})[/]\n"
+            f"[{DIM}]TaS[/]       {tas_line}\n"
             f"[{DIM}]MEMORY[/]    {bar(pct, 14, colour)} [{colour}]{pct:4.1f}%[/]\n"
             f"[{DIM}]          {human_tokens(used)} / {human_tokens(MAX_HISTORY_TOKENS)} ctx[/]\n"
             f"[{DIM}]MODEL[/]     [{VIOLET}]{model}[/]\n"
@@ -841,65 +1231,24 @@ class ZaniTUI(App):
 
     def refresh_hint(self) -> None:
         chat = "shrink chat" if self.chat_expanded else "focus chat"
-        speech = "speech off" if self.speaker.enabled else "speech"
         line = Text()
         if self.is_running_task:
-            # Colour is a continuous domain, unlike row heights, so this can
-            # genuinely ease: the glyph cycles while its hue breathes between
-            # two ambers on the same clock as the sheen.
             glyph = SPINNER[self._sheen_phase_frame(len(SPINNER))]
             line.append(f"{glyph} working…", style=Style(color=self.pulse(), bold=True))
         else:
             line.append("ready", style=Style(color=GREEN, bold=True))
         line.append("  ")
         line.append_text(
-            sheen(f"· ctrl+t mode · ctrl+f {chat} · ctrl+s {speech} · /clear · ctrl+c quit",
-                  SHEEN_HINT, self._sheen_phase)
+            sheen(f"· ctrl+f {chat} · /exit · ctrl+c quit", SHEEN_HINT, self._sheen_phase)
         )
         self.query_one("#hint", Static).update(line)
+
+    def set_mode(self, mode: str) -> None:
+        """Legacy no-op — tools are always enabled."""
 
     # ----------------------------------------------------------
     # INPUT
     # ----------------------------------------------------------
-    def action_toggle_speech(self) -> None:
-        """Turn speech on or off. Silences anything mid-sentence on the way out."""
-        from core.speech import available
-
-        if not self.speaker.enabled and not available():
-            self.log_write(
-                f"[{RED}]no audio player found — install mpv, ffplay or mpg123[/]"
-            )
-            return
-
-        self.speaker.enabled = not self.speaker.enabled
-        if not self.speaker.enabled:
-            self.speaker.stop()
-
-        state = "on" if self.speaker.enabled else "off"
-        colour = GREEN if self.speaker.enabled else DIM
-        self.log_write(
-            f"[{DIM}][{now_stamp()}][/] [{CHAT_ZANI}]zani[/] [{DIM}]>[/] "
-            f"speech [{colour}]{state}[/]"
-            + (f"[{DIM}] · voice {self.speaker.voice}[/]" if self.speaker.enabled else "")
-        )
-        self.refresh_hint()
-
-    def action_toggle_mode(self) -> None:
-        self.set_mode("chat" if self.mode == "act" else "act")
-
-    def set_mode(self, mode) -> None:
-        if mode not in ("chat", "act") or mode == self.mode:
-            return
-        self.mode = mode
-        self.refresh_caption()
-        self.refresh_status()
-        self.refresh_header()
-        self.log_write(
-            f"[{DIM}][{now_stamp()}][/] [{CHAT_ZANI}]zani[/] [{DIM}]>[/] mode → "
-            f"[{MAGENTA if mode == 'act' else CYAN}]{mode.upper()}[/]"
-            f"[{DIM}] ({'tools live' if mode == 'act' else 'tools withheld'})[/]"
-        )
-
     async def on_prompt_area_submitted(self, message: PromptArea.Submitted) -> None:
         prompt = message.value.strip()
         if not prompt or self.is_running_task:
@@ -929,20 +1278,10 @@ class ZaniTUI(App):
         parts = prompt.split()
         command = parts[0].lower()
 
-        if command == "/mode":
-            if len(parts) > 1 and parts[1].lower() in ("chat", "act"):
-                self.set_mode(parts[1].lower())
-            else:
-                self.log_write(f"[{DIM}]usage: /mode chat|act[/]")
-        elif command == "/tts":
-            wanted = parts[1].lower() if len(parts) > 1 else None
-            if wanted in ("on", "off"):
-                if (wanted == "on") != self.speaker.enabled:
-                    self.action_toggle_speech()
-            elif wanted is None:
-                self.action_toggle_speech()
-            else:
-                self.log_write(f"[{DIM}]usage: /tts on|off[/]")
+        if command == "/exit":
+            self.exit()
+        elif command in ("/tas",):
+            self.handle_tas_command(parts[1:])
         elif command == "/clear":
             self.log_clear()
             self.log_write(f"[{DIM}]console cleared — agent history untouched[/]")
@@ -958,8 +1297,102 @@ class ZaniTUI(App):
                 f"[{GREEN}][{now_stamp()}] harness > `.env` reads allowed this session "
                 f"(`.zani.env` remains blocked)[/]"
             )
+        elif command == "/model":
+            self.handle_model_command(parts[1:])
         else:
-            self.log_write(f"[{DIM}]unknown command: {command} (try /mode, /tts, /clear, /allow-env)[/]")
+            self.log_write(
+                f"[{DIM}]unknown command: {command} "
+                f"(try /model, /TaS, /clear, /exit)[/]"
+            )
+
+    def handle_tas_command(self, args: list[str]) -> None:
+        if args:
+            self.log_write(f"[{DIM}]use /TaS and pick from the menu[/]")
+            return
+        self.open_tas_picker()
+
+    def apply_model(self, model_id: str) -> None:
+        self.brain.tas_enabled = False
+        self._text_model = model_id
+        self.brain.model_name = model_id
+        model_catalog.save_project_model(
+            self.project_path, model_id, tas_enabled=False, text_model=model_id,
+        )
+        self._model_catalog_cache = None
+        self.rates = None
+        self.refresh_header()
+        self.refresh_ledger()
+        self.refresh_hint()
+        self.log_write(f"[{GREEN}]model →[/] [{TEXT}]{model_id}[/]")
+
+    def handle_model_command(self, args: list[str]) -> None:
+        if not args or args[0].lower() == "list":
+            self.open_model_picker()
+            return
+        query = " ".join(args)
+        if self._model_catalog_cache:
+            resolved = model_catalog.resolve_model_id(query, self._model_catalog_cache)
+            if resolved:
+                self.apply_model(resolved)
+                return
+        self.log_write(f"[{DIM}]resolving model…[/]")
+        self.resolve_and_apply_model(query)
+
+    @work(thread=True, exclusive=False)
+    def fetch_model_list(self) -> None:
+        try:
+            key = getattr(self.brain, "api_key", None) or ""
+            choices = model_catalog.list_models(self.brain.provider, key)
+        except Exception as exc:
+            self.call_from_thread(self._on_model_list_failed, exc)
+            return
+        if not choices:
+            self.call_from_thread(self._on_model_list_empty)
+            return
+        self.call_from_thread(self._on_model_list_loaded, choices)
+
+    @work(thread=True, exclusive=False)
+    def resolve_and_apply_model(self, query: str) -> None:
+        try:
+            choices = model_catalog.list_models(self.brain.provider, self.brain.api_key)
+        except Exception as exc:
+            self.call_from_thread(
+                self.log_write, f"[{RED}]model lookup failed: {exc}[/]"
+            )
+            return
+        resolved = model_catalog.resolve_model_id(query, choices)
+        if resolved:
+            self.call_from_thread(self.apply_model, resolved)
+        else:
+            self.call_from_thread(
+                self.log_write,
+                f"[{RED}]no unique match for[/] [{TEXT}]{query}[/] "
+                f"[{DIM}]— try /model list[/]",
+            )
+
+    def _on_model_list_loaded(self, choices) -> None:
+        self._model_catalog_cache = choices
+        if not self.model_picker.active:
+            self.model_picker.active = True
+        self.model_picker.set_models(choices)
+        self.model_picker.focus_id(self.brain.model_name)
+        self.refresh_model_picker()
+
+    def _on_model_list_failed(self, exc: Exception) -> None:
+        if self.model_picker.active:
+            self.model_picker.loading = False
+            self.model_picker.error = str(exc)
+            self.refresh_model_picker()
+            return
+        self.log_write(f"[{RED}]model list failed: {exc}[/]")
+
+    def _on_model_list_empty(self) -> None:
+        if self.model_picker.active:
+            self.model_picker.loading = False
+            self.model_picker.error = "no models returned"
+            self.refresh_model_picker()
+            return
+        self.log_write(f"[{RED}]model list returned empty.[/]")
 
     # ----------------------------------------------------------
     # ORCHESTRATION
@@ -994,21 +1427,13 @@ class ZaniTUI(App):
     async def run_orchestration(self, prompt: str) -> None:
         log = self.query_one("#chat_log", RichLog)
 
-        runtime_block = (
-            "\n\n[ZANI RUNTIME MODE]\n"
-            f"mode = {self.mode.upper()}\n"
-            f"tools_enabled = {'true' if self.mode == 'act' else 'false'}\n"
-            "If tools_enabled=false do not call tools.\n"
-            "If tools_enabled=true you may call tools multiple times to complete the user request.\n"
-        )
-
         try:
             await self.orchestrator.orchestration_loop(
-                prompt + runtime_block,
+                prompt,
                 self.brain.llm_api_caller,
                 ui_callback=self._write_to_log,
                 event_cb=self.on_agent_event,
-                tools_enabled=(self.mode == "act"),
+                tools_enabled=True,
             )
         except Exception as error:
             self.log_write(f"[{RED}][{now_stamp()}] system > {error}[/]")
@@ -1019,22 +1444,27 @@ class ZaniTUI(App):
             self.refresh_graph()
 
     @work(exclusive=True, thread=True)
-    def speak_reply(self, text: str) -> None:
-        """
-        Synthesis runs ~2x realtime, so it goes on a thread.
+    def play_tas_audio(self, audio_b64: str) -> None:
+        import base64
 
-        `exclusive` means a new reply pre-empts one still being spoken rather
-        than queueing behind it — stale narration is worse than none.
-        """
-        problem = self.speaker.speak(text)
-        if problem and problem != self.speaker.last_error:
-            self.speaker.last_error = problem
+        try:
+            nbytes = len(base64.b64decode(audio_b64, validate=False))
+        except Exception:
+            nbytes = 0
+        problem = audio_playback.play_base64(
+            audio_b64, audio_format=TAS_STREAM_AUDIO_FORMAT
+        )
+        if problem and problem != self._last_speech_error:
+            self._last_speech_error = problem
             self.call_from_thread(
-                self.log_write, f"[{RED}][{now_stamp()}] speech > {problem}[/]"
+                self.log_write,
+                f"[{RED}][{now_stamp()}] TaS audio > {problem} "
+                f"[{DIM}]({nbytes:,} bytes)[/]",
             )
 
     def _write_to_log(self, text=None, panel_content=None, title=None, style=None,
-                      is_markdown=False, is_syntax=False, language="json") -> None:
+                      is_markdown=False, is_syntax=False, language="json",
+                      audio_b64=None) -> None:
         if panel_content:
             if is_markdown:
                 content = Markdown(panel_content)
@@ -1044,10 +1474,21 @@ class ZaniTUI(App):
             else:
                 content = panel_content
 
-            # Only the finished reply is spoken — tool panels and progress
-            # lines are noise out loud, and each one would be billed.
-            if is_markdown and self.speaker.enabled:
-                self.speak_reply(panel_content)
+            if is_markdown and self.brain.tas_enabled:
+                if not audio_playback.playback_ready():
+                    if not self._tas_muted_notice:
+                        self._tas_muted_notice = True
+                        self.log_write(
+                            f"[{DIM}]TaS muted — sound not available here; "
+                            f"using text model (you won't hear replies).[/]"
+                        )
+                elif audio_b64:
+                    self.play_tas_audio(audio_b64)
+                else:
+                    self.log_write(
+                        f"[{DIM}]TaS live but this reply had no audio bytes "
+                        f"(text only from the provider).[/]"
+                    )
 
             # Stored as a renderable rather than pre-rendered text, so a replay
             # re-wraps it to whatever width the console currently has.
@@ -1064,9 +1505,21 @@ class ZaniTUI(App):
 
 
 async def launch_tui(brain, orchestrator, project_path=None, profile="base"):
+    root = project_path or os.getcwd()
+    state = model_catalog.load_project_model_state(root)
+    text_model = state.get("text_model") or state.get("model")
+    if text_model:
+        brain.model_name = text_model
+    if state.get("tas_enabled") and state.get("model"):
+        brain.tas_enabled = True
+        brain.model_name = state["model"]
+    brain.tas_voice = normalize_voice(state.get("tas_voice"))
+
     if profile == "base":
         from core.base_tui import BaseTUI
         app = BaseTUI(brain, orchestrator, project_path)
     else:
         app = ZaniTUI(brain, orchestrator, project_path)
+    app._text_model = text_model or brain.model_name
+    brain.text_model_fallback = app._text_model
     await app.run_async()

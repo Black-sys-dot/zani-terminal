@@ -34,7 +34,10 @@ dependencies = [
 
 [tool.setuptools]
 py-modules = ["zani"]
-packages = ["core", "core.servers", "config", "assets"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core", "core.*", "config", "assets"]
 
 [tool.setuptools.package-data]
 config = ["*.yaml", "*.yml"]

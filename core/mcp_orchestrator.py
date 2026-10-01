@@ -341,9 +341,9 @@ class ZaniMCPOrchestrator:
         
         console = Console()
 
-        def _log(text=None, panel_content=None, title=None, style=None, is_markdown=False, is_syntax=False, language="json"):
+        def _log(text=None, panel_content=None, title=None, style=None, is_markdown=False, is_syntax=False, language="json", audio_b64=None):
             if ui_callback:
-                ui_callback(text, panel_content, title, style, is_markdown, is_syntax, language)
+                ui_callback(text, panel_content, title, style, is_markdown, is_syntax, language, audio_b64)
             else:
                 if panel_content:
                     if is_markdown:
@@ -408,10 +408,11 @@ class ZaniMCPOrchestrator:
                 
                 # Print final model response nicely
                 _log(
-                    panel_content=response.get("content", ""), 
-                    title="🤖 Zani", 
+                    panel_content=response.get("content", ""),
+                    title="🤖 Zani",
                     style="bold magenta",
-                    is_markdown=True
+                    is_markdown=True,
+                    audio_b64=response.get("audio_b64") or None,
                 )
                 break
 

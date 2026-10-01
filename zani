@@ -23,6 +23,10 @@ First \`zani tui\` builds ${IMAGE} from:
 
 Requires Docker. API keys: project .zani.env (auto-created) and/or OPENROUTER_KEY /
 GOOGLE_API_KEY in the environment. Optional global defaults: ${ZANI_ROOT}/.env
+
+Docker + TaS: \`zani tui\` uses Pulse over TCP port 4713 by default (host must load
+  module-native-protocol-tcp). Override: ZANI_PULSE_TCP=4713 or PULSE_SERVER=tcp:...
+  Unix socket only if ZANI_PULSE_UNIX=1.
 EOF
 }
 
@@ -39,6 +43,10 @@ require_docker() {
 
 ensure_image() {
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    if ! docker run --rm --entrypoint python3 "$IMAGE" -c "import core.themes" >/dev/null 2>&1; then
+      echo "==> Image ${IMAGE} is outdated (missing packages); rebuilding..."
+      docker build -t "$IMAGE" "$ZANI_ROOT"
+    fi
     return 0
   fi
   echo "==> No local image ${IMAGE}; building (one-time, may take a few minutes)..."
@@ -54,8 +62,13 @@ run_tui() {
   require_docker
   ensure_image
 
+  local uid gid
+  uid="$(id -u)"
+  gid="$(id -g)"
+
   local -a run_args=(
     run -it --rm --init
+    --user "${uid}:${gid}"
     -e "TERM=${TERM:-xterm-256color}"
     -e OPENROUTER_KEY
     -e GOOGLE_API_KEY
@@ -66,6 +79,45 @@ run_tui() {
   if [[ -f "${ZANI_ROOT}/.env" ]]; then
     run_args+=(-v "${ZANI_ROOT}/.env:/app/.env:ro")
   fi
+
+  # TaS in Docker: unix Pulse socket almost always → "connection refused". Default TCP (your working fix).
+  local pulse_tcp="${ZANI_PULSE_TCP:-}"
+  if [[ -z "$pulse_tcp" ]] && [[ -z "${PULSE_SERVER:-}" ]]; then
+    if [[ -f "${ZANI_ROOT}/.env" ]]; then
+      pulse_tcp="$(grep -E '^ZANI_PULSE_TCP=' "${ZANI_ROOT}/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' \"' || true)"
+    fi
+    if [[ -z "$pulse_tcp" ]] && [[ -f "${PWD}/.zani.env" ]]; then
+      pulse_tcp="$(grep -E '^ZANI_PULSE_TCP=' "${PWD}/.zani.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' \"' || true)"
+    fi
+  fi
+
+  if [[ -n "${PULSE_SERVER:-}" ]]; then
+    run_args+=(-e "PULSE_SERVER=${PULSE_SERVER}")
+    if [[ "${PULSE_SERVER}" == tcp:* ]]; then
+      run_args+=(--add-host=host.docker.internal:host-gateway)
+    fi
+  elif [[ "${ZANI_PULSE_UNIX:-}" == 1 ]]; then
+    local pulse_sock="/run/user/${uid}/pulse/native"
+    if [[ -S "$pulse_sock" ]]; then
+      run_args+=(-e "PULSE_SERVER=unix:${pulse_sock}")
+      run_args+=(-e "XDG_RUNTIME_DIR=/run/user/${uid}")
+      run_args+=(-v "/run/user/${uid}:/run/user/${uid}:ro")
+    fi
+  else
+    run_args+=(--add-host=host.docker.internal:host-gateway)
+    run_args+=(-e "PULSE_SERVER=tcp:host.docker.internal:${pulse_tcp:-4713}")
+  fi
+  if getent group audio >/dev/null 2>&1; then
+    run_args+=(--group-add "$(getent group audio | cut -d: -f3)")
+  fi
+
+  # Keep container code in sync with the checkout that owns this launcher (no rebuild per edit).
+  local pkg="/usr/local/lib/python3.12/site-packages"
+  run_args+=(
+    -v "${ZANI_ROOT}/core:${pkg}/core:ro"
+    -v "${ZANI_ROOT}/config:${pkg}/config:ro"
+    -v "${ZANI_ROOT}/zani.py:${pkg}/zani.py:ro"
+  )
 
   run_args+=("$IMAGE" tui)
 
